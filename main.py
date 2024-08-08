@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
 from pdb import run
-from InquirerPy.resolver import prompt
-from InquirerPy import inquirer as inquirer
+from InquirerPy import inquirer
 import tempfile
 import os
 import tempfile
 from subprocess import call
-import os
 import re
 from openai import OpenAI
 import json
 from git import Repo
 import constants
 from utils import get_gitignore_files, get_user_prompt, select_user_files, validate_git_repo, run
-
+from dotenv import load_dotenv
 
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
 from typing import List
-
 import sys
 import threading
 
-
 from loguru import logger
 import tqdm.auto as tqdm
-import sys
 
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# Initialize the OpenAI client
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not OPENAI_API_KEY or not GEMINI_API_KEY:
+    print("Error: Missing API keys. Please set OPENAI_API_KEY and GEMINI_API_KEY in the environment or in a .env file.")
+    sys.exit(1)
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Models and their respective token limits
 MODEL_TOKEN_LIMITS = {
@@ -46,7 +51,7 @@ def setup_logging(level="DEBUG", show_module=False):
     """
     Setups better log format for loguru
     """
-    logger.remove(0)                                 # Remove the default logger
+    logger.remove(0)  # Remove the default logger
     log_level = level
     log_fmt = u"<green>["
     log_fmt += u"{file:10.10}…:{line:<3} | " if show_module else ""
@@ -60,7 +65,6 @@ def setup_logging(level="DEBUG", show_module=False):
 
 
 setup_logging("DEBUG")
-
 
 class Agent:
     def __init__(self, name, model="gemini-1.5-pro", temperature=0.0):
@@ -78,7 +82,7 @@ class Agent:
     def send_messages(self, messages, max_attempts=3, temperature=None):
         if "gemini" in self.model:
             model = genai.GenerativeModel(
-                model_name="gemini-1.5-pro",
+                model_name=self.model,  # Use the model specified
                 generation_config=self.gemini_config,
                 safety_settings={
                     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
@@ -88,22 +92,24 @@ class Agent:
                 },
                 system_instruction=self.system_message + "\n\nReturn a JSON and always escape newlines, tabs, quotes and other special characters.",
             )
-            # print(f"{messages[-1]["role"]}: {messages[-1]['content']}")
             history = [{"role": m["role"], "parts": m["content"]} for m in messages]
-            response = model.generate_content(history, stream=True) # type: ignore
+            response = model.generate_content(history, stream=True)  # type: ignore
         else:
             response = client.chat.completions.create(model=self.model,
-                                                    messages=[{
-                                                        "role": "system", "content": self.system_message + "\n\nReturn always a JSON."}] + messages,
-                                                    temperature=temperature if temperature else self.temperature,
-                                                    max_tokens=4096,
-                                                    response_format={"type": "json_object"},
-                                                    stream=True)
+                                                      messages=[
+                                                          {
+                                                              "role": "system",
+                                                              "content": self.system_message + "\n\nReturn always a JSON."}] + messages,
+                                                      temperature=temperature if temperature else self.temperature,
+                                                      max_tokens=4096,
+                                                      response_format={"type": "json_object"},
+                                                      stream=True)
 
         output = []
         attempts = 0
         for chunk in response:
-            token = "".join([part.text for part in chunk.candidates[0].content.parts]).replace("\n", "\\n") if "gemini" in self.model else chunk.choices[0].delta.content
+            token = "".join(
+                [part.text for part in chunk.candidates[0].content.parts]).replace("\n", "\\n") if "gemini" in self.model else chunk.choices[0].delta.content
             if token is not None:
                 output.append(token)
                 print(token, end="", flush=True)
@@ -163,13 +169,15 @@ class Coordinator:
                     self.apply_patch(patch)
                 except Exception as e:
                     action = None
+
                     def handle_patch_failure():
                         global action
                         choices = ["Retry", "Edit", "Skip"]
-                        questions = [{
-                            'type': 'list', 'name': 'response', 'message': 'Patch application failed. Choose an action or wait 3 seconds to auto-retry:', 'choices': choices}]
-                        response = prompt(questions)
-                        action = response['response']
+                        action = inquirer.select(
+                            message="Patch application failed. Choose an action or wait 3 seconds to auto-retry:",
+                            choices=choices
+                        ).execute()
+
                     thread = threading.Thread(target=handle_patch_failure, daemon=True)
                     thread.start()
                     thread.join(3)
@@ -178,7 +186,7 @@ class Coordinator:
                         self.apply_changes(task, fixed_patches, fixed_files, skip_check=True)
                     if action == "Edit":
                         edited_patch = self.edit_patch(patch)
-                        patches.insert(0, edited_patch) # Insert the edited patch at the beginning of the list
+                        patches.insert(0, edited_patch)  # Insert the edited patch at the beginning of the list
                     elif action == "Skip":
                         continue
                 else:
@@ -197,7 +205,7 @@ class Coordinator:
         else:
             logger.info("No new tasks from checker agent.")
 
-    def edit_patch(self, patch): # Open the temporary file in the default editor
+    def edit_patch(self, patch):  # Open the temporary file in the default editor
         editors = ["subl", "subl3", "code", os.environ.get('EDITOR')]
         editor = [editor for editor in editors if os.path.exists(f"/usr/bin/{editor}" or f"/usr/local/bin/{editor}")][0]
         call([editor, "-w", patch])
@@ -236,15 +244,20 @@ class Coordinator:
         return files_dict
 
     def apply_patch(self, patch):
-        cmd = f"git apply --recount --verbose --unidiff-zero -C0 --reject --ignore-space-change --ignore-whitespace --whitespace=fix {patch}" # --inaccurate-eof
+        if os.path.getsize(patch) == 0:
+            logger.warning(f"Patch file {patch} is empty. Skipping application.")
+            return
+
+        cmd = f"git apply --recount --verbose --unidiff-zero -C0 --reject --ignore-space-change --ignore-whitespace --whitespace=fix {patch}"  # --inaccurate-eof
         run(cmd)
         logger.success("Patch applied successfully.")
 
     def handle_task_selection(self, tasks):
         tasks_descriptions = [task["prompt"] for task in tasks]
         selected_indices = inquirer.checkbox(
-            message="Please select the refactoring tasks you want to proceed with:", # type: ignore
-            choices=[{"name": desc, "value": idx} for idx, desc in enumerate(tasks_descriptions)]).execute()
+            message="Please select the refactoring tasks you want to proceed with:",
+            choices=[{"name": desc, "value": idx} for idx, desc in enumerate(tasks_descriptions)]
+        ).execute()
         return [tasks[i] for i in selected_indices]
 
     def get_changes(self, task, error=None, temperature=None):
@@ -281,49 +294,25 @@ class Coordinator:
         return patches, files
 
     def prepare_patch_for_git(self, raw_patch):
-        # patch = raw_patch.replace("\\n", "\n") + "\n
         patch = raw_patch
-        # Normalize the repository working directory path to an absolute path without a trailing slash
         normalized_repo_path = os.path.abspath(self.repo.working_dir).rstrip('/').lstrip('/')
         escaped_repo_base_path = re.escape(normalized_repo_path)
 
-        # new_patch = patch.replace(normalized_repo_path, "")
-        # do it with regex, replacing any occurrence of the normalized repo path with an empty string
         new_patch = re.sub(escaped_repo_base_path + "/", "", patch, flags=re.MULTILINE)
 
-        # Handle complex cases where paths might still contain parts of the absolute path
         normalized_repo_path_segments = normalized_repo_path.split('/')
         for i in range(len(normalized_repo_path_segments), 0, -1):
             partial_path = "/".join(normalized_repo_path_segments[:i])
             escaped_partial_path = re.escape(partial_path)
             new_patch = re.sub(rf"{escaped_partial_path}/", "", new_patch, flags=re.MULTILINE)
 
-        # Check if there were changes to the patch
         if new_patch == patch:
             logger.info(f"Patch filepaths were not modified.")
         else:
             logger.warning(f"Patch filepaths were modified. Stripped the following from the patch file:\n{escaped_repo_base_path}")
 
-        # Ensure lines starting with no space have a space added before context lines
         new_patch = re.sub(r"^([^ +-])", r" \1", new_patch, flags=re.MULTILINE)
 
-        # Check if are there any changing +/- lines that have no content
-        # if re.search(r"^[+-]\s+$", new_patch, flags=re.MULTILINE):
-        #     # strip whitespaces from these lines, keeping the + and - signs intact
-        #     new_patch = re.sub(r"^(\s*[+-])\s+$", r"\1", new_patch, flags=re.MULTILINE)
-        #     logger.warning(f"Patch had changes only in whitespace. Stripped them from the patch file.")
-
-        # Check for hunk headers that contain line numbers and replace them with @@ ... @@ to avoid conflicts
-        # e.g.: from "@@ -19,7 +18,6 @@" to "@@ -0,0 +0,0 @@"
-        if re.search(r"^@@ [-+\d\,\s]+ @@", new_patch, flags=re.MULTILINE):
-            # strip the line numbers from the hunk headers
-            new_patch = re.sub(r"^@@ [-+\d\,\s]+ @@", r"@@ -0,0 +0,0 @@", new_patch, flags=re.MULTILINE)
-            logger.warning(f"Patch had hunk headers with line numbers. Replaced them with @@ -0,0 +0,0 @@.")
-
-        # replace any sequence of \n at the end of the patch with a single \n
-        new_patch = new_patch.strip("\n") + "\n"
-
-        # Write the modified patch to a temporary file
         with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
             temp_file.write(new_patch)
             temp_file_name = temp_file.name
@@ -344,8 +333,6 @@ class Coordinator:
             if codeblock["language"] == "patch" or codeblock["language"] == "diff"][0]
         logger.info(f"Got a patch for fixing the previous patch:\n```patch\n{patch}\n```")
         return patch
-
-        self.process_tasks(suggestor_output['tasks'], max_attempts)
 
 
 def main():
@@ -375,20 +362,23 @@ def main():
             if os.path.isfile(os.path.join(directory_path, file)) and os.path.join(directory_path, file) not in ignored_files]
 
     selected_files = select_user_files(file_paths) if len(sys.argv) == 2 else file_paths
-    prompt = get_user_prompt()
+    user_prompt = get_user_prompt()
 
-    agent_coordinator = Agent(name="agent_coordinator",
-                              temperature=0)
-    agent_suggestor = Agent(name="agent_suggestor",
-                            temperature=0)
-    agent_editor = Agent(name="agent_editor", temperature=0.5)
-    agent_checker = Agent(name="agent_checker",
-                          temperature=0)
+    models = list(MODEL_TOKEN_LIMITS.keys())
+    model_choice = inquirer.select(
+        message="Choose the model you want to use:",
+        choices=models
+    ).execute()
+
+    agent_coordinator = Agent(name="agent_coordinator", model=model_choice, temperature=0)
+    agent_suggestor = Agent(name="agent_suggestor", model=model_choice, temperature=0)
+    agent_editor = Agent(name="agent_editor", model=model_choice, temperature=0.5)
+    agent_checker = Agent(name="agent_checker", model=model_choice, temperature=0)
 
     coordinator = Coordinator(agent_coordinator,
                               agents=[agent_suggestor, agent_editor, agent_checker],
                               directory_path=directory_path)
-    coordinator.run(prompt, selected_files)
+    coordinator.run(user_prompt, selected_files)
 
     print("The refactoring was successful. The source code files have been updated with the patches.")
 

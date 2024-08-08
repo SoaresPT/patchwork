@@ -35,12 +35,27 @@ pip install -r requirements.txt
 ```
 
 ### 2. Add Patchwork to PATH
-Put `patchwork.sh` in your PATH (i.e.: make it executable) from any directory.
-
+For Unix-like systems, put `patchwork.sh` in your PATH (i.e.: make it executable) from any directory.
 ```sh
 export PATH=$PATH:/path/to/patchwork
 ```
 or, permanently add it to your `.bashrc` or `.zshrc` file.
+
+For Windows, use `patchwork.cmd`:
+```cmd
+setx PATH "%PATH%;C:\path\to\patchwork"
+```
+or, permanently add it to your system's environment variables through the System Properties.
+
+Alternatively, you can use a `.env` file.
+
+#### Using a `.env` file
+1. Rename `.env.example` to `.env`.
+2. Open `.env` and add your API keys:
+   ```plaintext
+   OPENAI_API_KEY=your_openai_api_key
+   GEMINI_API_KEY=your_gemini_api_key
+   ```
 
 ### 3. Run Patchwork
 
@@ -49,6 +64,11 @@ Call it from within any Git repository by passing the repo as the first argument
 ```sh
 cd /path/to/your/git/repo
 patchwork.sh .
+```
+or for Windows:
+```cmd
+cd /path/to/your/git/repo
+patchwork.cmd .
 ```
 
 ### 4. Select the relevant files, and provide a goal

@@ -14,3 +14,4 @@ scikit-learn==1.5.0
 colorama==0.4.6
 colorama==0.4.6
 google-generativeai==0.7.0
+python-dotenv==1.0.1
